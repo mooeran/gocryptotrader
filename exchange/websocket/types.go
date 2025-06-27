@@ -43,6 +43,7 @@ type KlineData struct {
 	HighPrice  float64
 	LowPrice   float64
 	Volume     float64
+	IsConfirm  bool
 }
 
 // UnhandledMessageWarning defines a container for unhandled message warnings

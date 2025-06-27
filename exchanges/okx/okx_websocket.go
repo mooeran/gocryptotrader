@@ -1299,7 +1299,7 @@ func (ok *Okx) wsProcessCandles(respRaw []byte) error {
 	}
 	response := struct {
 		Argument SubscriptionInfo  `json:"arg"`
-		Data     [][7]types.Number `json:"data"`
+		Data     [][8]types.Number `json:"data"`
 	}{}
 	err := json.Unmarshal(respRaw, &response)
 	if err != nil {
@@ -1322,10 +1322,24 @@ func (ok *Okx) wsProcessCandles(respRaw []byte) error {
 		}
 	}
 	candleInterval := strings.TrimPrefix(response.Argument.Channel, candle)
+	d, err := time.ParseDuration(candleInterval)
+	if err != nil {
+		return err
+	}
 	for i := range response.Data {
 		for j := range assets {
+			startTime := time.UnixMilli(response.Data[i][0].Int64())
+			closeTime := time.Now()
+			if response.Data[i][7] > 0 {
+				closeTime = startTime.Add(d)
+			}
+			if closeTime.Before(startTime) {
+				closeTime = startTime
+			}
 			ok.Websocket.DataHandler <- websocket.KlineData{
 				Timestamp:  time.UnixMilli(response.Data[i][0].Int64()),
+				StartTime:  startTime,
+				CloseTime:  closeTime,
 				Pair:       response.Argument.InstrumentID,
 				AssetType:  assets[j],
 				Exchange:   ok.Name,
@@ -1335,6 +1349,7 @@ func (ok *Okx) wsProcessCandles(respRaw []byte) error {
 				HighPrice:  response.Data[i][2].Float64(),
 				LowPrice:   response.Data[i][3].Float64(),
 				Volume:     response.Data[i][5].Float64(),
+				IsConfirm:  response.Data[i][7] > 0,
 			}
 		}
 	}
