@@ -344,13 +344,43 @@ func (ok *Okx) Unsubscribe(channelsToUnsubscribe subscription.List) error {
 // handleSubscription sends a subscription and unsubscription information thought the websocket endpoint.
 // as of the okx, exchange this endpoint sends subscription and unsubscription messages but with a list of json objects.
 func (ok *Okx) handleSubscription(ctx context.Context, operation string, subs subscription.List) error {
-	reqs := WSSubscriptionInformationList{Operation: operation}
-	authRequests := WSSubscriptionInformationList{Operation: operation}
-	var channels subscription.List
-	var authChannels subscription.List
-	var errs error
-	for i := 0; i < len(subs); i++ {
-		s := subs[i]
+	var (
+		publicReqs      WSSubscriptionInformationList
+		privateReqs     WSSubscriptionInformationList
+		publicChannels  subscription.List
+		privateChannels subscription.List
+		errs            error
+	)
+
+	publicReqs.Operation = operation
+	privateReqs.Operation = operation
+
+	// 定义一个发送函数，避免代码重复
+	sender := func(reqs *WSSubscriptionInformationList, channels *subscription.List, conn websocket.Connection) error {
+		if len(reqs.Arguments) == 0 {
+			return nil
+		}
+		if err := conn.SendJSONMessage(ctx, request.Unset, reqs); err != nil {
+			return err
+		}
+
+		var err error
+		if operation == operationUnsubscribe {
+			err = ok.Websocket.RemoveSubscriptions(conn, (*channels)...)
+		} else {
+			err = ok.Websocket.AddSuccessfulSubscriptions(conn, (*channels)...)
+		}
+		if err != nil {
+			return err
+		}
+
+		// 重置以准备下一批
+		*reqs = WSSubscriptionInformationList{Operation: operation}
+		*channels = subscription.List{}
+		return nil
+	}
+
+	for _, s := range subs {
 		var arg SubscriptionInfo
 		if err := json.Unmarshal([]byte(s.QualifiedChannel), &arg); err != nil {
 			errs = common.AppendError(errs, err)
@@ -358,75 +388,70 @@ func (ok *Okx) handleSubscription(ctx context.Context, operation string, subs su
 		}
 
 		if s.Authenticated {
-			authChannels = append(authChannels, s)
-			authRequests.Arguments = append(authRequests.Arguments, arg)
-			authChunk, err := json.Marshal(authRequests)
+			// 将当前订阅添加到批处理中
+			privateReqs.Arguments = append(privateReqs.Arguments, arg)
+			privateChannels = append(privateChannels, s)
+
+			// 检查添加后的大小
+			authChunk, err := json.Marshal(privateReqs)
 			if err != nil {
-				return err
+				return err // 如果序列化失败，这是个严重错误
 			}
+
 			if len(authChunk) > maxConnByteLen {
-				authRequests.Arguments = authRequests.Arguments[:len(authRequests.Arguments)-1]
-				i--
-				err = ok.Websocket.AuthConn.SendJSONMessage(ctx, request.Unset, authRequests)
-				if err != nil {
+				// 如果超长，则发送前一个状态（不包含当前订阅）
+				// 并将当前订阅作为下一批的第一个
+				prevReqs := privateReqs
+				prevReqs.Arguments = prevReqs.Arguments[:len(prevReqs.Arguments)-1]
+				prevChannels := privateChannels[:len(privateChannels)-1]
+
+				if err := sender(&prevReqs, &prevChannels, ok.Websocket.AuthConn); err != nil {
 					return err
 				}
-				if operation == operationUnsubscribe {
-					err = ok.Websocket.RemoveSubscriptions(ok.Websocket.AuthConn, channels...)
-				} else {
-					err = ok.Websocket.AddSuccessfulSubscriptions(ok.Websocket.AuthConn, channels...)
-				}
-				if err != nil {
-					return err
-				}
-				authChannels = subscription.List{}
-				authRequests.Arguments = []SubscriptionInfo{}
+
+				// 当前订阅成为新一批的开始
+				privateReqs.Arguments = []SubscriptionInfo{arg}
+				privateChannels = subscription.List{s}
 			}
 		} else {
-			channels = append(channels, s)
-			reqs.Arguments = append(reqs.Arguments, arg)
-			chunk, err := json.Marshal(reqs)
+			// 对公共频道的处理逻辑与私有频道相同
+			publicReqs.Arguments = append(publicReqs.Arguments, arg)
+			publicChannels = append(publicChannels, s)
+
+			chunk, err := json.Marshal(publicReqs)
 			if err != nil {
 				return err
 			}
+
 			if len(chunk) > maxConnByteLen {
-				i--
-				err = ok.Websocket.Conn.SendJSONMessage(ctx, request.Unset, reqs)
-				if err != nil {
+				prevReqs := publicReqs
+				prevReqs.Arguments = prevReqs.Arguments[:len(prevReqs.Arguments)-1]
+				prevChannels := publicChannels[:len(publicChannels)-1]
+
+				if err := sender(&prevReqs, &prevChannels, ok.Websocket.Conn); err != nil {
 					return err
 				}
-				if operation == operationUnsubscribe {
-					err = ok.Websocket.RemoveSubscriptions(ok.Websocket.Conn, channels...)
-				} else {
-					err = ok.Websocket.AddSuccessfulSubscriptions(ok.Websocket.Conn, channels...)
-				}
-				if err != nil {
-					return err
-				}
-				channels = subscription.List{}
-				reqs.Arguments = []SubscriptionInfo{}
-				continue
+
+				publicReqs.Arguments = []SubscriptionInfo{arg}
+				publicChannels = subscription.List{s}
 			}
 		}
 	}
 
-	if len(reqs.Arguments) > 0 {
-		if err := ok.Websocket.Conn.SendJSONMessage(ctx, request.Unset, reqs); err != nil {
-			return err
+	// 发送循环结束后剩余的订阅
+	if len(publicReqs.Arguments) > 0 {
+		if err := sender(&publicReqs, &publicChannels, ok.Websocket.Conn); err != nil {
+			errs = common.AppendError(errs, err)
 		}
 	}
 
-	if len(authRequests.Arguments) > 0 && ok.Websocket.CanUseAuthenticatedEndpoints() {
-		if err := ok.Websocket.AuthConn.SendJSONMessage(ctx, request.Unset, authRequests); err != nil {
-			return err
+	if len(privateReqs.Arguments) > 0 && ok.Websocket.CanUseAuthenticatedEndpoints() {
+		if err := sender(&privateReqs, &privateChannels, ok.Websocket.AuthConn); err != nil {
+			errs = common.AppendError(errs, err)
 		}
 	}
 
-	channels = append(channels, authChannels...)
-	if operation == operationUnsubscribe {
-		return ok.Websocket.RemoveSubscriptions(ok.Websocket.Conn, channels...)
-	}
-	return ok.Websocket.AddSuccessfulSubscriptions(ok.Websocket.Conn, channels...)
+	return errs
 }
 
 // WsHandleData will read websocket raw data and pass to appropriate handler
