@@ -1317,6 +1317,47 @@ func (ok *Okx) wsProcessOrders(respRaw []byte) error {
 	return nil
 }
 
+func (ok *Okx) convertCandleInterval(strInterval string) kline.Interval {
+	switch strInterval {
+	case "1m":
+		return kline.OneMin
+	case "3m":
+		return kline.ThreeMin
+	case "5m":
+		return kline.FiveMin
+	case "15m":
+		return kline.FifteenMin
+	case "30m":
+		return kline.ThirtyMin
+	case "1H":
+		return kline.OneHour
+	case "2H":
+		return kline.TwoHour
+	case "4H":
+		return kline.FourHour
+	case "6H":
+		return kline.SixHour
+	case "12H":
+		return kline.TwelveHour
+	case "1D":
+		return kline.OneDay
+	case "2D":
+		return kline.TwoDay
+	case "3D":
+		return kline.ThreeDay
+	case "5D":
+		return kline.FiveDay
+	case "1W":
+		return kline.OneWeek
+	case "1M":
+		return kline.OneMonth
+	case "3M":
+		return kline.ThreeMonth
+	default:
+		return kline.Raw
+	}
+}
+
 // wsProcessCandles handler to get a list of candlestick messages.
 func (ok *Okx) wsProcessCandles(respRaw []byte) error {
 	if respRaw == nil {
@@ -1349,10 +1390,8 @@ func (ok *Okx) wsProcessCandles(respRaw []byte) error {
 		}
 	}
 	candleInterval := strings.TrimPrefix(response.Argument.Channel, candle)
-	d, err := time.ParseDuration(candleInterval)
-	if err != nil {
-		return err
-	}
+	interval := ok.convertCandleInterval(candleInterval)
+	d := interval.Duration()
 	for i := range response.Data {
 		for j := range assets {
 			startTime := time.UnixMilli(response.Data[i][0].Int64())
